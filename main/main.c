@@ -5,10 +5,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "info.h"
 
 #include "esp_system.h"             // esp_init functions esp_err_t
 #include "esp_wifi.h"               // esp_wifi_init functions and wifi operations
@@ -31,18 +31,15 @@
 #define LIGHT_FIRST_HALF    8
 #define LIGHT_SECOND_HALF   9
 
-const char* logTAG = "I2C";
-
-TaskHandle_t i2cTaskHandle = NULL;
-TaskHandle_t webServerTaskHandle = NULL;
+static const char *logLightAppTAG = "Light-App";
+static const char *logI2CTAG = "I2C";
 
 static uint8_t relay = 0x00;
 
 static cJSON *lightJSON;
-static const char *TAG = "Light-App";
 
-const char *SSID = "";
-const char *PASS = "";
+const char *SSID = "OpenWrt";
+const char *PASS = "8kE6CEFo";
 
 static char *state_relay = "false";
 
@@ -58,11 +55,14 @@ light lightforQueueRX;
 
 QueueHandle_t lightQueue;
 
+TaskHandle_t i2cTaskHandle = NULL;
+TaskHandle_t webServerTaskHandle = NULL;
+
 // =============================================================================================================================
 // FREERTOS_TASK_I2C_PCF8574 
 // =============================================================================================================================
 void I2C_Task(void *arg) {
-    // Настройка и запуск шины I2C #0
+    // Настройка и запуск шины I2C #0#include "esp_chip_info.h"
     i2c_master_bus_config_t i2c_master_config;
     i2c_master_config.clk_source = I2C_CLK_SRC_DEFAULT;     // Clock source for the bus
     i2c_master_config.i2c_port = I2C_NUM_0;                 // Bus number (I2C_NUM_0 or I2C_NUM_1)
@@ -75,13 +75,13 @@ void I2C_Task(void *arg) {
     // Setup bus
     i2c_master_bus_handle_t bus_handle;
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_master_config, &bus_handle)); 
-    ESP_LOGI(logTAG, "I2C bus is configured");
+    ESP_LOGI(logI2CTAG, "I2C bus is configured");
     // Сканирование шины (поиск устройств)
-    for (uint8_t i = 1; i < 128; i++) {
-        if (i2c_master_probe(bus_handle, i, -1) == ESP_OK) {
-        ESP_LOGI(logTAG, "Found device on bus 0 at address 0x%.2X", i);
-        };
-    };
+    //for (uint8_t i = 1; i < 128; i++) {
+        //if (i2c_master_probe(bus_handle, i, -1) == ESP_OK) {
+        //ESP_LOGI(logI2CTAG, "Found device on bus 0 at address 0x%.2X", i);
+       // };
+    //};
     // Setup slave-device
     i2c_device_config_t i2c_device_config;
     i2c_device_config.dev_addr_length = I2C_ADDR_BIT_LEN_7; 
@@ -92,22 +92,21 @@ void I2C_Task(void *arg) {
     // Setup PCF8574
     i2c_master_dev_handle_t dev_handle;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &i2c_device_config, &dev_handle));
-    ESP_LOGI(logTAG, "PCF8574 is configured");
+    ESP_LOGI(logI2CTAG, "PCF8574 is configured");
 
     uint8_t value = 0xFF;
     while(1){
         if( xQueueReceive(lightQueue, &lightforQueueRX, portMAX_DELAY)) {
             // Записываем значение в PCF8574
-            ESP_LOGI(logTAG, "PCF8574 RX: 0x%.2X", lightforQueueRX.number);
+            ESP_LOGI(logI2CTAG, "PCF8574 RX: 0x%.2X", lightforQueueRX.number);
             if (lightforQueueRX.state) {
                 value &= lightforQueueRX.number;
-                ESP_LOGI(logTAG, "PCF8574 true: 0x%.2X", value);
+                ESP_LOGI(logI2CTAG, "PCF8574 true: 0x%.2X", value);
             } else {
                 value |= ~lightforQueueRX.number;
-                ESP_LOGI(logTAG, "PCF8574 false: 0x%.2X", value);
+                ESP_LOGI(logI2CTAG, "PCF8574 false: 0x%.2X", value);
             }
              
-            
             i2c_master_transmit(dev_handle, &value, sizeof(value), -1);
         }
     }
@@ -204,11 +203,25 @@ esp_err_t esp_light_set_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Callback function of the HTTP GET request INFO CHIP
+esp_err_t esp_info_chip_get_handler(httpd_req_t *req) {
+    //Send data in JSON containing the status of smart lights to the client
+    httpd_resp_send(req, cJSON_Print(get_chip_info()), strlen(cJSON_Print(get_chip_info())));
+    return ESP_OK;
+}
+
 //Callback function corresponding to GET
 static const httpd_uri_t status = {
     .uri = "/lights",
     .method = HTTP_GET,
     .handler = esp_light_get_handler,
+};
+
+//Callback function corresponding to GET
+static const httpd_uri_t info_chip = {
+    .uri = "/info",
+    .method = HTTP_GET,
+    .handler = esp_info_chip_get_handler,
 };
 
 //Callback function corresponding to POST
@@ -225,18 +238,19 @@ esp_err_t esp_start_webserver() {
     config.lru_purge_enable = true;
 
     //Start the HTTP server
-    ESP_LOGI(TAG, "Starting server on port: ’%d’", config. server_port);
+    ESP_LOGI(logLightAppTAG, "Starting server on port: ’%d’", config. server_port);
     
     if (httpd_start(&server, &config) == ESP_OK) {
         //Set the callback function corresponding to the HTTP URI
-        ESP_LOGI(TAG, "Registering URI handlers");
+        ESP_LOGI(logLightAppTAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &status);
         httpd_register_uri_handler(server, &ctrl);
+        httpd_register_uri_handler(server, &info_chip);
 
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Error starting server!" );
+    ESP_LOGI(logLightAppTAG, "Error starting server!" );
 
     return ESP_FAIL;
 }
@@ -269,30 +283,30 @@ void wifi_connection() {
 
     // network interdace initialization
     esp_netif_init();
-    ESP_LOGI(TAG, "esp_netif_init()");
+    ESP_LOGI(logLightAppTAG, "esp_netif_init()");
 
     // responsible for handling and dispatching events
     esp_event_loop_create_default();
 
     // sets up necessaru data struct for wifi station interface
     esp_netif_create_default_wifi_sta();
-    ESP_LOGI(TAG, "esp_netif_create_default_wifi_sta()");
+    ESP_LOGI(logLightAppTAG, "esp_netif_create_default_wifi_sta()");
 
     // sets up wifi_init_config struct with default values
     wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_LOGI(TAG, "wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT()");
+    ESP_LOGI(logLightAppTAG, "wifi_init_config_t wifi_init = WIFI_INIT_CONFIG_DEFAULT()");
 
     // wifi initialised with dafault wifi_initiation
     esp_wifi_init(&wifi_init);
-    ESP_LOGI(TAG, "esp_wifi_init(&wifi_init)");
+    ESP_LOGI(logLightAppTAG, "esp_wifi_init(&wifi_init)");
 
     // creating event handler register for wifi
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
-    ESP_LOGI(TAG, "esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL)");
+    ESP_LOGI(logLightAppTAG, "esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL)");
 
     // creating event handler register for ip event
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
-    ESP_LOGI(TAG, "esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL)");
+    ESP_LOGI(logLightAppTAG, "esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL)");
 
     // struct wifi_config_t var wifi_configuration
     wifi_config_t wifi_configuration = {
@@ -301,28 +315,28 @@ void wifi_connection() {
             .password = ""
         }
     };
-    ESP_LOGI(TAG, " wifi_config_t wifi_configuration = {}");
+    ESP_LOGI(logLightAppTAG, " wifi_config_t wifi_configuration = {}");
 
     //gpio_set_level(relay, 1);
     strcpy((char*) wifi_configuration.sta.ssid, SSID);
     strcpy((char*) wifi_configuration.sta.password, PASS);
-    ESP_LOGI(TAG, "strcpy");
+    ESP_LOGI(logLightAppTAG, "strcpy");
 
     // setting up configs when event ESP_IF_WIFI_STA
     esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_configuration);
-    ESP_LOGI(TAG, "esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_configuration)");
+    ESP_LOGI(logLightAppTAG, "esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_configuration)");
 
     // start connection with configurations provided in funtion
     esp_wifi_start();
-    ESP_LOGI(TAG, "esp_wifi_start()");
+    ESP_LOGI(logLightAppTAG, "esp_wifi_start()");
 
     // station mode selected
     esp_wifi_set_mode(WIFI_MODE_STA);
-    ESP_LOGI(TAG, "esp_wifi_set_mode(WIFI_MODE_STA)");
+    ESP_LOGI(logLightAppTAG, "esp_wifi_set_mode(WIFI_MODE_STA)");
 
     // connect with saved ssid and pass
     esp_wifi_connect();
-    ESP_LOGI(TAG, "esp_wifi_connect()");
+    ESP_LOGI(logLightAppTAG, "esp_wifi_connect()");
     printf( "wifi_init_softap finished. SSID:%s  password:%s", wifi_configuration.sta.ssid,
                                                                wifi_configuration.sta.password);
 }      
